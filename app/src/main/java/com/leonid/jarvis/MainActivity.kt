@@ -4,248 +4,159 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraManager
-import android.media.AudioManager
-import android.os.BatteryManager
-import android.os.Bundle
+import android.graphics.*
 import android.os.Build
-import android.provider.MediaStore
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.widget.Button
+import android.os.Bundle
+import android.view.Gravity
+import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import kotlin.math.sin
 
-/** Privacy-first foreground push-to-talk release. No background mic service or autostart. */
-class MainActivity : Activity(), RecognitionListener {
+class MainActivity : Activity() {
     private lateinit var status: TextView
-    private lateinit var listenButton: Button
-    private var recognizer: SpeechRecognizer? = null
-    private var tts: TextToSpeech? = null
-    private var microphoneReady = false
-    private var flashlightOn = false
-    private val russian = Locale("ru", "RU")
-    private val permissionsCode = 45
-    private val servicePermissionsCode = 46
-    private var pendingFlash = false
+    private val permissionCode = 46
+    private val bg = Color.rgb(2, 10, 18)
+    private val cyan = Color.rgb(0, 229, 255)
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+    override fun onCreate(state: Bundle?) {
+        super.onCreate(state)
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        buildInterface()
+        window.decorView.post { ensurePermissionsAndStart() }
+    }
+
+    private fun buildInterface() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(40, 84, 40, 32)
-            setBackgroundColor(Color.rgb(8, 22, 35))
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(36), dp(24), dp(36))
+            setBackgroundColor(bg)
         }
         root.addView(TextView(this).apply {
-            text = "J.A.R.V.I.S.   1.0"
-            textSize = 28f
-            setTextColor(Color.CYAN)
+            text = "J.A.R.V.I.S."
+            textSize = 34f
+            gravity = Gravity.CENTER
+            setTextColor(cyan)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
         })
+        root.addView(TextView(this).apply {
+            text = "SYSTEM ONLINE"
+            textSize = 11f
+            gravity = Gravity.CENTER
+            letterSpacing = .28f
+            setTextColor(Color.rgb(100, 185, 210))
+            setPadding(0, dp(4), 0, dp(22))
+        })
+        root.addView(ArcReactorView(this), LinearLayout.LayoutParams(dp(300), dp(300)))
         status = TextView(this).apply {
-            text = "\nК вашим услугам, сэр.\n\nПосле выдачи разрешений JARVIS работает в фоне и ждёт обращение по имени.\n\nСкажите: «Джарвис» и команду.\n\nКоманды: фонарик, время, заряд, камера, громче, тише, открой [приложение]."
-            textSize = 17f
-            setTextColor(Color.WHITE)
+            text = "ИНИЦИАЛИЗАЦИЯ ЯДРА…"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            letterSpacing = .12f
+            setTextColor(Color.rgb(160, 230, 245))
+            setPadding(0, dp(26), 0, 0)
         }
         root.addView(status)
-        listenButton = Button(this).apply {
-            text = "🎙 НАЖАТЬ И ГОВОРИТЬ"
-            setOnClickListener { requestVoice() }
-        }
-        root.addView(listenButton)
-        root.addView(Button(this).apply {
-            text = "🔦 ФОНАРИК"
-            setOnClickListener { changeFlash(!flashlightOn) }
-        })
-        root.addView(Button(this).apply {
-            text = "📷 КАМЕРА"
-            setOnClickListener { openCamera() }
-        })
-        root.addView(Button(this).apply {
-            text = "🔋 ЗАРЯД"
-            setOnClickListener { battery() }
-        })
-        root.addView(Button(this).apply {
-            text = "▶ АКТИВИРОВАТЬ ДЖАРВИС В ФОНЕ"
-            setOnClickListener { ensureBackgroundService() }
-        })
-        root.addView(Button(this).apply {
-            text = "■ ОТКЛЮЧИТЬ ФОНОВЫЙ РЕЖИМ"
-            setOnClickListener {
-                stopService(Intent(this@MainActivity, JarvisService::class.java))
-                status.text = "Фоновый режим отключён, сэр."
-            }
+        root.addView(TextView(this).apply {
+            text = "Скажите «Джарвис» и команду"
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(90, 145, 165))
+            setPadding(0, dp(12), 0, 0)
         })
         setContentView(root)
-        tts = TextToSpeech(this) { result ->
-            if (result == TextToSpeech.SUCCESS) {
-                tts?.language = russian
-                tts?.setPitch(0.88f)
-                tts?.setSpeechRate(0.95f)
-            }
-        }
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-                setRecognitionListener(this@MainActivity)
-            }
-        } else status.text = "На устройстве нет службы распознавания речи. Кнопки управления всё равно работают."
-        window.decorView.post { ensureBackgroundService() }
     }
 
-    private fun ensureBackgroundService() {
+    private fun ensurePermissionsAndStart() {
         val missing = mutableListOf<String>()
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.RECORD_AUDIO)
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.CAMERA)
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.POST_NOTIFICATIONS)
-        if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), servicePermissionsCode)
-            return
-        }
-        startJarvisService()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.RECORD_AUDIO)
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            missing.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), permissionCode)
+        else startJarvis()
     }
 
-    private fun startJarvisService() {
-        val intent = Intent(this, JarvisService::class.java)
+    private fun startJarvis() {
         try {
+            val intent = Intent(this, JarvisService::class.java)
             if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
-            status.text = "JARVIS активен в фоне. Скажите «Джарвис» и команду, сэр."
+            status.text = "ЯДРО АКТИВНО"
         } catch (_: Exception) {
-            status.text = "Не удалось запустить фоновый режим, сэр."
+            status.text = "ОШИБКА ЗАПУСКА ЯДРА"
         }
     }
 
-    private fun tell(message: String) {
-        status.text = message
-        tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "jarvis-response")
-    }
-    private fun requestVoice() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), permissionsCode)
-            return
-        }
-        startVoice()
-    }
-    private fun startVoice() {
-        if (recognizer == null) {
-            status.text = "Распознавание речи недоступно на этом телефоне."
-            return
-        }
-        listenButton.isEnabled = false
-        status.text = "Слушаю, сэр..."
-        try {
-            recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            })
-        } catch (_: Exception) {
-            listenButton.isEnabled = true
-            status.text = "Не удалось запустить распознавание речи."
-        }
-    }
     override fun onRequestPermissionsResult(code: Int, permissions: Array<out String>, grants: IntArray) {
         super.onRequestPermissionsResult(code, permissions, grants)
-        if (code == servicePermissionsCode) {
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startJarvisService()
-            else status.text = "Без разрешения на микрофон фоновый JARVIS не сможет слушать, сэр."
-            return
+        if (code != permissionCode) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startJarvis()
+        } else status.text = "ТРЕБУЕТСЯ ДОСТУП К МИКРОФОНУ"
+    }
+
+    private fun dp(value: Int) = (value * resources.displayMetrics.density + .5f).toInt()
+
+    private class ArcReactorView(context: android.content.Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var phase = 0f
+        private var rotation = 0f
+
+        init {
+            setLayerType(LAYER_TYPE_SOFTWARE, null)
         }
-        if (code != permissionsCode) return
-        if (permissions.contains(Manifest.permission.RECORD_AUDIO)) {
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startVoice()
-            else status.text = "Без разрешения на микрофон голосовой ввод недоступен."
-        }
-        if (permissions.contains(Manifest.permission.CAMERA)) {
-            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED && pendingFlash) {
-                pendingFlash = false
-                changeFlash(!flashlightOn)
-            } else {
-                pendingFlash = false
-                status.text = "Для фонарика нужно разрешение на камеру."
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val cx = width / 2f
+            val cy = height / 2f
+            val base = minOf(width, height) * .42f
+            val pulse = 1f + sin(phase.toDouble()).toFloat() * .035f
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.argb(30, 0, 229, 255)
+            paint.setShadowLayer(base * .35f, 0f, 0f, Color.CYAN)
+            canvas.drawCircle(cx, cy, base * pulse, paint)
+            paint.clearShadowLayer()
+
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dpF(3f)
+            paint.color = Color.rgb(0, 210, 255)
+            paint.setShadowLayer(18f, 0f, 0f, Color.CYAN)
+            canvas.drawCircle(cx, cy, base * .78f * pulse, paint)
+            paint.clearShadowLayer()
+
+            paint.strokeWidth = dpF(9f)
+            paint.strokeCap = Paint.Cap.ROUND
+            val rect = RectF(cx - base * .62f, cy - base * .62f, cx + base * .62f, cy + base * .62f)
+            for (i in 0 until 12) {
+                paint.color = if (i % 3 == 0) Color.WHITE else Color.rgb(0, 190, 240)
+                canvas.drawArc(rect, rotation + i * 30f, 17f, false, paint)
             }
+
+            paint.strokeWidth = dpF(2f)
+            paint.color = Color.rgb(80, 235, 255)
+            canvas.drawCircle(cx, cy, base * .40f, paint)
+
+            paint.style = Paint.Style.FILL
+            paint.color = Color.WHITE
+            paint.setShadowLayer(22f, 0f, 0f, Color.CYAN)
+            canvas.drawCircle(cx, cy, base * .27f * pulse, paint)
+            paint.clearShadowLayer()
+
+            paint.color = Color.rgb(0, 120, 170)
+            canvas.drawCircle(cx, cy, base * .12f, paint)
+
+            phase += .07f
+            rotation = (rotation + .55f) % 360f
+            postInvalidateOnAnimation()
         }
-    }
-    private fun changeFlash(on: Boolean) {
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            pendingFlash = true
-            requestPermissions(arrayOf(Manifest.permission.CAMERA), permissionsCode)
-            return
-        }
-        try {
-            val camera = getSystemService(CameraManager::class.java)
-            val cameraId = camera.cameraIdList.firstOrNull { id ->
-                camera.getCameraCharacteristics(id).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-            }
-            if (cameraId == null) { tell("Фонарик не найден, сэр."); return }
-            camera.setTorchMode(cameraId, on)
-            flashlightOn = on
-            tell(if (on) "Фонарик включён, сэр." else "Фонарик выключен, сэр.")
-        } catch (_: Exception) { tell("Не удалось переключить фонарик, сэр.") }
-    }
-    private fun openCamera() {
-        try {
-            startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))
-            tell("Камера открыта, сэр.")
-        } catch (_: Exception) { tell("Не удалось открыть камеру, сэр.") }
-    }
-    private fun battery() {
-        val manager = getSystemService(BATTERY_SERVICE) as BatteryManager
-        tell("Заряд аккумулятора — ${manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)} процентов, сэр.")
-    }
-    private fun handleCommand(raw: String) {
-        val cmd = raw.lowercase(russian).replace("джарвис", "").trim()
-        when {
-            cmd.contains("фонар") -> changeFlash(!(cmd.contains("выключ") || cmd.contains("отключ") || cmd.contains("погаси")))
-            cmd.contains("время") || cmd.contains("который час") -> tell("Сейчас ${SimpleDateFormat("HH:mm", russian).format(Date())}, сэр.")
-            cmd.contains("заряд") || cmd.contains("батаре") -> battery()
-            cmd.contains("камер") -> openCamera()
-            cmd.contains("громче") || cmd.contains("тише") -> {
-                val manager = getSystemService(AUDIO_SERVICE) as AudioManager
-                manager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                    if (cmd.contains("громче")) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0)
-                tell("Громкость изменена, сэр.")
-            }
-            cmd.startsWith("открой ") || cmd.startsWith("запусти ") -> {
-                val name = cmd.substringAfter(" ").trim()
-                val list = packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
-                val app = list.firstOrNull { it.loadLabel(packageManager).toString().lowercase(russian).contains(name) && name.isNotBlank() }
-                val launch = app?.activityInfo?.packageName?.let { packageManager.getLaunchIntentForPackage(it) }
-                if (launch == null) tell("Приложение не найдено, сэр.")
-                else try {
-                    startActivity(launch)
-                    tell("Открываю ${name}, сэр.")
-                } catch (_: Exception) { tell("Не удалось открыть приложение, сэр.") }
-            }
-            else -> tell("Пока не знаю такой команды, сэр.")
-        }
-    }
-    override fun onResults(results: Bundle?) {
-        listenButton.isEnabled = true
-        val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-        if (spoken != null) handleCommand(spoken) else status.text = "Не расслышал, сэр."
-    }
-    override fun onError(error: Int) {
-        listenButton.isEnabled = true
-        status.text = "Не расслышал команду. Нажмите кнопку и повторите, сэр. (код $error)"
-    }
-    override fun onReadyForSpeech(params: Bundle?) {}
-    override fun onBeginningOfSpeech() {}
-    override fun onRmsChanged(rmsdB: Float) {}
-    override fun onBufferReceived(buffer: ByteArray?) {}
-    override fun onEndOfSpeech() {}
-    override fun onPartialResults(partialResults: Bundle?) {}
-    override fun onEvent(eventType: Int, params: Bundle?) {}
-    override fun onDestroy() {
-        recognizer?.cancel()
-        recognizer?.destroy()
-        tts?.stop()
-        tts?.shutdown()
-        super.onDestroy()
+
+        private fun dpF(value: Float) = value * resources.displayMetrics.density
     }
 }
