@@ -9,7 +9,8 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.os.BatteryManager
-import android.os.Bundle\nimport android.os.Build
+import android.os.Bundle
+import android.os.Build
 import android.provider.MediaStore
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -31,7 +32,8 @@ class MainActivity : Activity(), RecognitionListener {
     private var microphoneReady = false
     private var flashlightOn = false
     private val russian = Locale("ru", "RU")
-    private val permissionsCode = 45\n    private val servicePermissionsCode = 46
+    private val permissionsCode = 45
+    private val servicePermissionsCode = 46
     private var pendingFlash = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
