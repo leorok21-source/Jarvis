@@ -2,28 +2,52 @@ package com.leonid.jarvis
 
 import android.Manifest
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlin.math.sin
+import java.io.File
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private val permissionCode = 46
+    private val modelName = "jarvis-qwen3-0.6b-q4.gguf"
+    private val modelUrl = "https://huggingface.co/farpluto/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf?download=true"
+    private var downloadId = -1L
     private val bg = Color.rgb(2, 10, 18)
     private val cyan = Color.rgb(0, 229, 255)
+
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) == downloadId) {
+                val file = modelFile()
+                if (file.exists() && file.length() > 100_000_000L) {
+                    status.text = "ЛОКАЛЬНЫЙ ИИ ГОТОВ"
+                    startJarvis()
+                } else status.text = "ОШИБКА ЗАГРУЗКИ МОДЕЛИ"
+            }
+        }
+    }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         window.statusBarColor = bg
         window.navigationBarColor = bg
         buildInterface()
+        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(downloadReceiver, filter, RECEIVER_NOT_EXPORTED)
+        else registerReceiver(downloadReceiver, filter)
         window.decorView.post { ensurePermissionsAndStart() }
     }
 
@@ -79,7 +103,26 @@ class MainActivity : Activity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             missing.add(Manifest.permission.POST_NOTIFICATIONS)
         if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), permissionCode)
-        else startJarvis()
+        else ensureModel()
+    }
+
+    private fun modelFile(): File = File(getExternalFilesDir(null), modelName)
+
+    private fun ensureModel() {
+        val file = modelFile()
+        if (file.exists() && file.length() > 100_000_000L) {
+            status.text = "ЛОКАЛЬНЫЙ ИИ ЗАГРУЖЕН"
+            startJarvis()
+            return
+        }
+        status.text = "ЗАГРУЗКА ЛОКАЛЬНОГО ИИ • ОДИН РАЗ"
+        val request = DownloadManager.Request(Uri.parse(modelUrl))
+            .setTitle("JARVIS: локальный ИИ")
+            .setDescription("Загрузка автономной модели без лимитов")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+            .setAllowedOverMetered(true)
+            .setDestinationUri(Uri.fromFile(file))
+        downloadId = getSystemService(DownloadManager::class.java).enqueue(request)
     }
 
     private fun startJarvis() {
@@ -96,8 +139,13 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(code, permissions, grants)
         if (code != permissionCode) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startJarvis()
+            ensureModel()
         } else status.text = "ТРЕБУЕТСЯ ДОСТУП К МИКРОФОНУ"
+    }
+
+    override fun onDestroy() {
+        try { unregisterReceiver(downloadReceiver) } catch (_: Exception) {}
+        super.onDestroy()
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density + .5f).toInt()
