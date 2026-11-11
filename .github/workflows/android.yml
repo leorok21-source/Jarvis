@@ -10,6 +10,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Bundle offline Russian Vosk model
+        run: |
+          mkdir -p app/src/main/assets
+          curl --fail --location --retry 3 \
+            https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip \
+            --output app/src/main/assets/vosk-model-small-ru-0.22.zip
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
