@@ -8,6 +8,9 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.os.*
 import android.provider.MediaStore
+import android.provider.AlarmClock
+import android.app.SearchManager
+import android.net.Uri
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import org.json.JSONObject
@@ -15,6 +18,10 @@ import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.RecognitionListener
 import org.vosk.android.SpeechService
+import com.arm.aichat.AiChat
+import com.arm.aichat.InferenceEngine
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -27,6 +34,9 @@ class JarvisService : Service(), RecognitionListener {
     private var model: Model? = null
     private var speech: SpeechService? = null
     private var tts: TextToSpeech? = null
+    private lateinit var ai: InferenceEngine
+    private val aiScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var aiReady = false
     private var ttsReady = false
     private var modelReady = false
     private var stopping = false
@@ -52,6 +62,29 @@ class JarvisService : Service(), RecognitionListener {
         })
         initVoice()
         initOfflineModel()
+        initLocalAi()
+    }
+
+    private fun initLocalAi() {
+        val file = File(getExternalFilesDir(null), "jarvis-qwen3-0.6b-q4.gguf")
+        if (!file.exists()) return
+        aiScope.launch {
+            try {
+                ai = AiChat.getInferenceEngine(this@JarvisService)
+                ai.loadModel(file.absolutePath)
+                ai.setSystemPrompt(
+                    """Ты JARVIS, мужской помощник Леонида. Отвечай по-русски, кратко и уважительно, обращаясь «сэр».
+Для действий телефона верни только JSON без пояснений:
+{"action":"flash_on|flash_off|camera|volume_up|volume_down|open_app|timer|alarm|map|web|answer","value":"параметр"}.
+timer value — минуты числом; alarm value — время HH:mm; open_app — название; map — место; web — запрос.
+Если это вопрос или разговор, action=answer и value=твой ответ."""
+                )
+                aiReady = true
+                updateNotification("Офлайн-ИИ готов • скажите «Джарвис»")
+            } catch (_: Exception) {
+                updateNotification("Голосовые команды готовы • ИИ не загрузился")
+            }
+        }
     }
 
     private fun initVoice() {
@@ -231,8 +264,78 @@ class JarvisService : Service(), RecognitionListener {
                 say("Отключаюсь, сэр.")
                 handler.postDelayed({ stopSelf() }, 900)
             }
-            else -> say("Эту команду я пока не выполняю, сэр.")
+            else -> if (aiReady) askLocalAi(command) else say("Локальный интеллект ещё загружается, сэр.")
         }
+    }
+
+    private fun askLocalAi(command: String) {
+        speech?.setPause(true)
+        updateNotification("Обдумываю запрос локально…")
+        aiScope.launch {
+            try {
+                val response = StringBuilder()
+                ai.sendUserPrompt(command, 180).collect { response.append(it) }
+                handler.post { executeAiResponse(response.toString()) }
+            } catch (_: Exception) {
+                handler.post { say("Не удалось обработать запрос локально, сэр.") }
+            }
+        }
+    }
+
+    private fun executeAiResponse(raw: String) {
+        try {
+            val start = raw.indexOf('{')
+            val end = raw.lastIndexOf('}')
+            val data = JSONObject(raw.substring(start, end + 1))
+            val action = data.optString("action")
+            val value = data.optString("value")
+            when (action) {
+                "flash_on" -> changeFlash(true)
+                "flash_off" -> changeFlash(false)
+                "camera" -> openCamera()
+                "volume_up" -> adjustVolume(true)
+                "volume_down" -> adjustVolume(false)
+                "open_app" -> openApplication(value)
+                "timer" -> openTimer(value.toIntOrNull() ?: 1)
+                "alarm" -> openAlarm(value)
+                "map" -> openExternal(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=" + Uri.encode(value))), "Открываю маршрут, сэр.")
+                "web" -> openExternal(Intent(Intent.ACTION_WEB_SEARCH).putExtra(SearchManager.QUERY, value), "Ищу информацию, сэр.")
+                else -> say(if (value.isBlank()) raw.take(500) else value.take(500))
+            }
+        } catch (_: Exception) {
+            say(raw.replace(Regex("<think>[\\s\\S]*?</think>"), "").trim().take(500))
+        }
+    }
+
+    private fun adjustVolume(up: Boolean) {
+        val audio = getSystemService(AUDIO_SERVICE) as AudioManager
+        audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+        say("Громкость изменена, сэр.")
+    }
+
+    private fun openTimer(minutes: Int) {
+        openExternal(
+            Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, minutes.coerceAtLeast(1) * 60).putExtra(AlarmClock.EXTRA_SKIP_UI, true),
+            "Таймер установлен, сэр."
+        )
+    }
+
+    private fun openAlarm(value: String) {
+        val parts = value.split(":")
+        val hour = parts.getOrNull(0)?.toIntOrNull() ?: 7
+        val minute = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        openExternal(
+            Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, hour).putExtra(AlarmClock.EXTRA_MINUTES, minute).putExtra(AlarmClock.EXTRA_SKIP_UI, true),
+            "Будильник установлен, сэр."
+        )
+    }
+
+    private fun openExternal(intent: Intent, confirmation: String) {
+        try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            say(confirmation)
+        } catch (_: Exception) { say("Android не разрешил выполнить это действие, сэр.") }
     }
 
     private fun say(message: String) {
@@ -285,6 +388,8 @@ class JarvisService : Service(), RecognitionListener {
         speech?.stop()
         speech?.shutdown()
         model?.close()
+        aiScope.cancel()
+        if (::ai.isInitialized) ai.destroy()
         tts?.stop()
         tts?.shutdown()
         stopForeground(STOP_FOREGROUND_REMOVE)
