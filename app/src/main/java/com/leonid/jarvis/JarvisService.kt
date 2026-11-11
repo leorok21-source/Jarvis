@@ -62,9 +62,9 @@ class JarvisService : Service(), RecognitionListener {
                 tts?.setSpeechRate(0.93f)
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(id: String?) {}
-                    override fun onDone(id: String?) = handler.post { resumeListening() }
+                    override fun onDone(id: String?) { handler.post { resumeListening() } }
                     @Deprecated("Deprecated")
-                    override fun onError(id: String?) = handler.post { resumeListening() }
+                    override fun onError(id: String?) { handler.post { resumeListening() } }
                 })
                 ttsReady = true
                 maybeActivate()
