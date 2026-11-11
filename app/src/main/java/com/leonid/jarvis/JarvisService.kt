@@ -8,53 +8,124 @@ import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.os.*
 import android.provider.MediaStore
-import android.speech.*
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.RecognitionListener
+import org.vosk.android.SpeechService
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipInputStream
 
 class JarvisService : Service(), RecognitionListener {
     private val handler = Handler(Looper.getMainLooper())
-    private var recognizer: SpeechRecognizer? = null
+    private var model: Model? = null
+    private var speech: SpeechService? = null
     private var tts: TextToSpeech? = null
-    private var speaking = false
+    private var ttsReady = false
+    private var modelReady = false
     private var stopping = false
-    private var ready = false
     private var activeUntil = 0L
     private var torchId: String? = null
     private val channelId = "jarvis_active"
-    private val listenAgain = Runnable { listen() }
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> speech?.setPause(true)
+                Intent.ACTION_USER_PRESENT -> if (!stopping) speech?.setPause(false)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-            setRecognitionListener(this@JarvisService)
-        }
+        registerReceiver(screenReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)
+        })
+        initVoice()
+        initOfflineModel()
+    }
+
+    private fun initVoice() {
         tts = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
                 tts?.language = Locale("ru", "RU")
                 tts?.setPitch(0.82f)
                 tts?.setSpeechRate(0.93f)
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(id: String?) { speaking = true }
-                    override fun onDone(id: String?) = resumeAfterSpeech()
+                    override fun onStart(id: String?) {}
+                    override fun onDone(id: String?) = handler.post { resumeListening() }
                     @Deprecated("Deprecated")
-                    override fun onError(id: String?) = resumeAfterSpeech()
+                    override fun onError(id: String?) = handler.post { resumeListening() }
                 })
-                ready = true
-                say("Джарвис активирован. К вашим услугам, сэр.")
-            } else schedule(1200)
+                ttsReady = true
+                maybeActivate()
+            }
         }
     }
 
-    private fun resumeAfterSpeech() {
-        handler.post {
-            speaking = false
-            schedule(450)
+    private fun initOfflineModel() {
+        Thread {
+            try {
+                val directory = File(filesDir, "vosk-model-small-ru-0.22")
+                val marker = File(directory, "conf/model.conf")
+                if (!marker.exists()) unpackModel(directory)
+                model = Model(directory.absolutePath)
+                modelReady = true
+                handler.post { maybeActivate() }
+            } catch (_: Exception) {
+                updateNotification("Ошибка загрузки офлайн-модели")
+            }
+        }.start()
+    }
+
+    private fun unpackModel(destination: File) {
+        val root = filesDir.canonicalFile
+        assets.open("vosk-model-small-ru-0.22.zip").use { input ->
+            ZipInputStream(input.buffered()).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    val output = File(filesDir, entry.name).canonicalFile
+                    if (!output.path.startsWith(root.path + File.separator)) throw SecurityException("Invalid model path")
+                    if (entry.isDirectory) output.mkdirs()
+                    else {
+                        output.parentFile?.mkdirs()
+                        FileOutputStream(output).use { zip.copyTo(it) }
+                    }
+                    zip.closeEntry()
+                    entry = zip.nextEntry
+                }
+            }
         }
+        if (!File(destination, "conf/model.conf").exists()) throw IllegalStateException("Model unpack failed")
+    }
+
+    private fun maybeActivate() {
+        if (!modelReady || !ttsReady || stopping) return
+        updateNotification("Офлайн-ядро готово • скажите «Джарвис»")
+        say("Джарвис активирован. К вашим услугам, сэр.")
+    }
+
+    private fun startListening() {
+        if (speech != null || stopping) return
+        try {
+            val recognizer = Recognizer(model, 16000.0f)
+            speech = SpeechService(recognizer, 16000.0f).also { it.startListening(this) }
+        } catch (_: Exception) {
+            updateNotification("Не удалось запустить микрофон")
+        }
+    }
+
+    private fun resumeListening() {
+        if (speech == null) startListening() else speech?.setPause(false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -63,102 +134,73 @@ class JarvisService : Service(), RecognitionListener {
             handler.postDelayed({ stopSelf() }, 900)
             return START_NOT_STICKY
         }
-        val openApp = PendingIntent.getActivity(
+        val open = PendingIntent.getActivity(
             this, 1, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val stopIntent = Intent(this, JarvisService::class.java).setAction("STOP_JARVIS")
         val stop = PendingIntent.getService(
-            this, 2, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            this, 2, Intent(this, JarvisService::class.java).setAction("STOP_JARVIS"),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = Notification.Builder(this, channelId)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("J.A.R.V.I.S. активен")
-            .setContentText("Скажите «Джарвис» и команду")
-            .setContentIntent(openApp)
+            .setContentTitle("J.A.R.V.I.S. запускает ядро")
+            .setContentText("Подготовка локального распознавания…")
+            .setContentIntent(open)
             .addAction(android.R.drawable.ic_delete, "Отключить", stop)
             .setOngoing(true)
             .build()
-        try {
-            if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(77, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-            } else startForeground(77, notification)
-            if (ready && !speaking) schedule(250)
-        } catch (_: Exception) {
-            stopSelf()
-        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(77, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else startForeground(77, notification)
+        if (modelReady && ttsReady) maybeActivate()
         return START_STICKY
     }
 
     private fun createChannel() {
-        val channel = NotificationChannel(
-            channelId, "JARVIS работает", NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Фоновое распознавание обращения «Джарвис»"
-            setSound(null, null)
-        }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-    }
-
-    private fun phoneAvailable(): Boolean {
-        val power = getSystemService(PowerManager::class.java)
-        val keyguard = getSystemService(KeyguardManager::class.java)
-        return power.isInteractive && !keyguard.isKeyguardLocked
-    }
-
-    private fun schedule(delay: Long = 650) {
-        handler.removeCallbacks(listenAgain)
-        if (!stopping && !speaking) handler.postDelayed(listenAgain, delay)
-    }
-
-    private fun listen() {
-        if (stopping || speaking || !ready) return
-        if (!phoneAvailable()) {
-            schedule(2500)
-            return
-        }
-        try {
-            recognizer?.cancel()
-            recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
-            })
-        } catch (_: Exception) {
-            schedule(1500)
-        }
-    }
-
-    private fun say(message: String) {
-        speaking = true
-        handler.removeCallbacks(listenAgain)
-        recognizer?.cancel()
-        tts?.stop()
-        val result = tts?.speak(
-            message, TextToSpeech.QUEUE_FLUSH, null, "jarvis-" + System.currentTimeMillis()
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(channelId, "JARVIS работает", NotificationManager.IMPORTANCE_LOW).apply {
+                setSound(null, null)
+            }
         )
-        if (result != TextToSpeech.SUCCESS) {
-            speaking = false
-            schedule(800)
-        }
     }
 
-    override fun onResults(results: Bundle?) {
-        val candidates = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-        val phrase = candidates.firstOrNull {
-            it.lowercase(Locale.ROOT).contains("джарвис") || it.lowercase(Locale.ROOT).contains("jarvis")
-        } ?: candidates.firstOrNull().orEmpty()
-        handle(phrase.lowercase(Locale.ROOT).trim())
+    private fun updateNotification(message: String) {
+        val open = PendingIntent.getActivity(
+            this, 1, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = Notification.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("J.A.R.V.I.S. активен")
+            .setContentText(message)
+            .setContentIntent(open)
+            .setOngoing(true)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(77, notification)
     }
+
+    private fun textFrom(json: String, key: String): String =
+        try { JSONObject(json).optString(key).lowercase(Locale.ROOT).trim() } catch (_: Exception) { "" }
+
+    override fun onResult(hypothesis: String?) {
+        val phrase = textFrom(hypothesis.orEmpty(), "text")
+        if (phrase.isNotBlank()) handle(phrase)
+    }
+
+    override fun onPartialResult(hypothesis: String?) {}
+    override fun onFinalResult(hypothesis: String?) {
+        val phrase = textFrom(hypothesis.orEmpty(), "text")
+        if (phrase.isNotBlank()) handle(phrase)
+    }
+    override fun onError(exception: Exception?) {
+        updateNotification("Ошибка микрофона • откройте JARVIS")
+    }
+    override fun onTimeout() {}
 
     private fun handle(phrase: String) {
         val addressed = phrase.contains("джарвис") || phrase.contains("jarvis")
-        if (!addressed && System.currentTimeMillis() > activeUntil) {
-            schedule(350)
-            return
-        }
+        if (!addressed && System.currentTimeMillis() > activeUntil) return
         val command = phrase.replace("джарвис", "").replace("jarvis", "")
             .trim(' ', ',', '.', '!', '?')
         activeUntil = System.currentTimeMillis() + 15_000L
@@ -171,9 +213,8 @@ class JarvisService : Service(), RecognitionListener {
                 val battery = getSystemService(BATTERY_SERVICE) as BatteryManager
                 say("Заряд аккумулятора " + battery.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) + " процентов, сэр.")
             }
-            command.contains("время") || command.contains("который час") -> {
+            command.contains("время") || command.contains("который час") ->
                 say("Сейчас " + SimpleDateFormat("HH:mm", Locale("ru")).format(Date()) + ", сэр.")
-            }
             command.contains("громче") || command.contains("тише") -> {
                 val audio = getSystemService(AUDIO_SERVICE) as AudioManager
                 audio.adjustStreamVolume(
@@ -184,9 +225,8 @@ class JarvisService : Service(), RecognitionListener {
                 say("Громкость изменена, сэр.")
             }
             command.contains("камер") -> openCamera()
-            command.startsWith("открой ") || command.startsWith("запусти ") -> {
+            command.startsWith("открой ") || command.startsWith("запусти ") ->
                 openApplication(command.substringAfter(" ").trim())
-            }
             command.contains("отключись") || command.contains("перестань слушать") -> {
                 say("Отключаюсь, сэр.")
                 handler.postDelayed({ stopSelf() }, 900)
@@ -195,14 +235,17 @@ class JarvisService : Service(), RecognitionListener {
         }
     }
 
+    private fun say(message: String) {
+        speech?.setPause(true)
+        val result = tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "jarvis-" + System.currentTimeMillis())
+        if (result != TextToSpeech.SUCCESS) resumeListening()
+    }
+
     private fun changeFlash(on: Boolean) {
         try {
             val manager = getSystemService(CameraManager::class.java)
-            if (torchId == null) {
-                torchId = manager.cameraIdList.firstOrNull {
-                    manager.getCameraCharacteristics(it)
-                        .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-                }
+            if (torchId == null) torchId = manager.cameraIdList.firstOrNull {
+                manager.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
             }
             val id = torchId
             if (id == null) say("Фонарик не найден, сэр.")
@@ -210,21 +253,14 @@ class JarvisService : Service(), RecognitionListener {
                 manager.setTorchMode(id, on)
                 say(if (on) "Фонарик включён, сэр." else "Фонарик выключен, сэр.")
             }
-        } catch (_: Exception) {
-            say("Не удалось переключить фонарик, сэр.")
-        }
+        } catch (_: Exception) { say("Не удалось переключить фонарик, сэр.") }
     }
 
     private fun openCamera() {
         try {
-            startActivity(
-                Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
+            startActivity(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             say("Открываю камеру, сэр.")
-        } catch (_: Exception) {
-            say("Android не разрешил открыть камеру из фона, сэр.")
-        }
+        } catch (_: Exception) { say("Android не разрешил открыть камеру из фона, сэр.") }
     }
 
     private fun openApplication(name: String) {
@@ -232,39 +268,23 @@ class JarvisService : Service(), RecognitionListener {
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
         )
         val item = apps.firstOrNull {
-            it.loadLabel(packageManager).toString().lowercase(Locale.ROOT).contains(name) &&
-                name.isNotBlank()
+            it.loadLabel(packageManager).toString().lowercase(Locale.ROOT).contains(name) && name.isNotBlank()
         }
         val launch = item?.activityInfo?.packageName?.let { packageManager.getLaunchIntentForPackage(it) }
-        if (launch == null) {
-            say("Приложение не найдено, сэр.")
-            return
-        }
-        try {
+        if (launch == null) say("Приложение не найдено, сэр.")
+        else try {
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(launch)
             say("Открываю " + name + ", сэр.")
-        } catch (_: Exception) {
-            say("Android не разрешил открыть приложение из фона, сэр.")
-        }
+        } catch (_: Exception) { say("Android не разрешил открыть приложение из фона, сэр.") }
     }
-
-    override fun onError(error: Int) {
-        schedule(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 1400 else 700)
-    }
-    override fun onReadyForSpeech(params: Bundle?) {}
-    override fun onBeginningOfSpeech() {}
-    override fun onRmsChanged(rmsdB: Float) {}
-    override fun onBufferReceived(buffer: ByteArray?) {}
-    override fun onEndOfSpeech() {}
-    override fun onPartialResults(partialResults: Bundle?) {}
-    override fun onEvent(eventType: Int, params: Bundle?) {}
 
     override fun onDestroy() {
         stopping = true
-        handler.removeCallbacksAndMessages(null)
-        recognizer?.cancel()
-        recognizer?.destroy()
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        speech?.stop()
+        speech?.shutdown()
+        model?.close()
         tts?.stop()
         tts?.shutdown()
         stopForeground(STOP_FOREGROUND_REMOVE)
