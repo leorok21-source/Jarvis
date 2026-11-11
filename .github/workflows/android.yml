@@ -15,6 +15,8 @@ jobs:
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
           mkdir -p gradle
           cp llama.cpp/examples/llama.android/gradle/libs.versions.toml gradle/libs.versions.toml
+          sed -i 's/-DGGML_CPU_ALL_VARIANTS=ON/-DGGML_CPU_ALL_VARIANTS=OFF/' llama.cpp/examples/llama.android/lib/build.gradle.kts
+          sed -i 's/listOf("arm64-v8a", "x86_64")/listOf("arm64-v8a")/' llama.cpp/examples/llama.android/lib/build.gradle.kts
       - name: Bundle offline Russian Vosk model
         run: |
           mkdir -p app/src/main/assets
