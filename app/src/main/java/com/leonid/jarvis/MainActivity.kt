@@ -28,7 +28,7 @@ class MainActivity : Activity() {
         }
         panel.addView(title)
         info = TextView(this).apply {
-            text = "\nСлушаю вас, сэр.\n\nПроизнесите «Джарвис», затем команду.\n\nФонарик, камера, заряд, время, громкость, музыка, поиск."
+            text = "\nГолосовой помощник — тестовая версия.\n\nПосле нажатия «Активировать» приложение использует микрофон для распознавания команд, в том числе при свёрнутом окне. На экране появляется постоянное уведомление Android.\n\nНажмите «Остановить», чтобы выключить прослушивание.\n\nКоманды: фонарик, камера, заряд, время, громкость, открытие приложений."
             textSize = 18f
             setTextColor(Color.WHITE)
         }
@@ -36,7 +36,7 @@ class MainActivity : Activity() {
         fun button(label: String, click: () -> Unit) {
             panel.addView(Button(this).apply { text = label; setOnClickListener { click() } })
         }
-        button("АКТИВИРОВАТЬ ДЖАРВИСА") { startJarvis() }
+        button("ВКЛЮЧИТЬ МИКРОФОН И ДЖАРВИСА") { startJarvis() }
         button("ОСТАНОВИТЬ") { startService(Intent(this, JarvisService::class.java).setAction("STOP")) }
         setContentView(panel)
     }
