@@ -15,3 +15,9 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
+
+
+dependencies {
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+}
