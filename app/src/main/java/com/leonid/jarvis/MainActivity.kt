@@ -9,7 +9,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.os.BatteryManager
-import android.os.Bundle
+import android.os.Bundle\nimport android.os.Build
 import android.provider.MediaStore
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -31,7 +31,7 @@ class MainActivity : Activity(), RecognitionListener {
     private var microphoneReady = false
     private var flashlightOn = false
     private val russian = Locale("ru", "RU")
-    private val permissionsCode = 45
+    private val permissionsCode = 45\n    private val servicePermissionsCode = 46
     private var pendingFlash = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,7 +47,7 @@ class MainActivity : Activity(), RecognitionListener {
             setTextColor(Color.CYAN)
         })
         status = TextView(this).apply {
-            text = "\nК вашим услугам, сэр.\n\nНажмите кнопку и произнесите команду.\n\nМикрофон используется только после нажатия. Без скрытого прослушивания и фонового запуска.\n\nКоманды: фонарик, время, заряд, камера, громче, тише, открой [приложение]."
+            text = "\nК вашим услугам, сэр.\n\nПосле выдачи разрешений JARVIS работает в фоне и ждёт обращение по имени.\n\nСкажите: «Джарвис» и команду.\n\nКоманды: фонарик, время, заряд, камера, громче, тише, открой [приложение]."
             textSize = 17f
             setTextColor(Color.WHITE)
         }
@@ -69,6 +69,17 @@ class MainActivity : Activity(), RecognitionListener {
             text = "🔋 ЗАРЯД"
             setOnClickListener { battery() }
         })
+        root.addView(Button(this).apply {
+            text = "▶ АКТИВИРОВАТЬ ДЖАРВИС В ФОНЕ"
+            setOnClickListener { ensureBackgroundService() }
+        })
+        root.addView(Button(this).apply {
+            text = "■ ОТКЛЮЧИТЬ ФОНОВЫЙ РЕЖИМ"
+            setOnClickListener {
+                stopService(Intent(this@MainActivity, JarvisService::class.java))
+                status.text = "Фоновый режим отключён, сэр."
+            }
+        })
         setContentView(root)
         tts = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
@@ -82,7 +93,31 @@ class MainActivity : Activity(), RecognitionListener {
                 setRecognitionListener(this@MainActivity)
             }
         } else status.text = "На устройстве нет службы распознавания речи. Кнопки управления всё равно работают."
+        window.decorView.post { ensureBackgroundService() }
     }
+
+    private fun ensureBackgroundService() {
+        val missing = mutableListOf<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.RECORD_AUDIO)
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) missing.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), servicePermissionsCode)
+            return
+        }
+        startJarvisService()
+    }
+
+    private fun startJarvisService() {
+        val intent = Intent(this, JarvisService::class.java)
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            status.text = "JARVIS активен в фоне. Скажите «Джарвис» и команду, сэр."
+        } catch (_: Exception) {
+            status.text = "Не удалось запустить фоновый режим, сэр."
+        }
+    }
+
     private fun tell(message: String) {
         status.text = message
         tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "jarvis-response")
@@ -114,6 +149,11 @@ class MainActivity : Activity(), RecognitionListener {
     }
     override fun onRequestPermissionsResult(code: Int, permissions: Array<out String>, grants: IntArray) {
         super.onRequestPermissionsResult(code, permissions, grants)
+        if (code == servicePermissionsCode) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startJarvisService()
+            else status.text = "Без разрешения на микрофон фоновый JARVIS не сможет слушать, сэр."
+            return
+        }
         if (code != permissionsCode) return
         if (permissions.contains(Manifest.permission.RECORD_AUDIO)) {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startVoice()
