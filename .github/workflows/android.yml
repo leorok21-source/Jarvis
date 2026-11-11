@@ -10,6 +10,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare official llama.cpp Android runtime
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+          mkdir -p gradle
+          cp llama.cpp/examples/llama.android/gradle/libs.versions.toml gradle/libs.versions.toml
       - name: Bundle offline Russian Vosk model
         run: |
           mkdir -p app/src/main/assets
@@ -24,7 +29,7 @@ jobs:
         run: |
           SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
+          "$SDKMANAGER" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;29.0.13113456' 'cmake;3.31.6'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
